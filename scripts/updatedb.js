@@ -2,9 +2,10 @@
 
 'use strict';
 
-var cp = require('child_process');
+var user_agent = 'Mozilla/5.0 (Windows NT 6.1; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/39.0.2171.36 Safari/537.36';
+
 var fs = require('fs');
-var http = require('http');
+var https = require('https');
 var path = require('path');
 var url = require('url');
 var zlib = require('zlib');
@@ -13,7 +14,9 @@ fs.existsSync = fs.existsSync || path.existsSync;
 
 var async = require('async');
 var colors = require('colors');
-var LineInputStream = require('line-input-stream');
+var glob = require('glob');
+var iconv = require('iconv-lite');
+var lazy = require('lazy');
 var rimraf = require('rimraf').sync;
 var unzip = require('unzip');
 var utils = require('../lib/utils');
@@ -21,33 +24,20 @@ var utils = require('../lib/utils');
 var dataPath = path.join(__dirname, '..', 'data');
 var tmpPath = path.join(__dirname, '..', 'tmp');
 
-var databases = [{
-	type: 'country',
-	url: 'http://geolite.maxmind.com/download/geoip/database/GeoIPCountryCSV.zip',
-	src: 'GeoIPCountryWhois.csv',
-	dest: 'geoip-country.dat'
-},{
-	type: 'country',
-	url: 'http://geolite.maxmind.com/download/geoip/database/GeoIPv6.csv.gz',
-	src: 'GeoIPv6.csv',
-	dest: 'geoip-country6.dat'
-},{
-	type: 'city-extended',
-	url: 'http://geolite.maxmind.com/download/geoip/database/GeoLiteCity_CSV/GeoLiteCity_20121204.zip',
-	src: [
-		'GeoLiteCity/GeoLiteCity-Blocks.csv',
-		'GeoLiteCity/GeoLiteCity-Location.csv'
-	],
-	dest: [
-		'geoip-city.dat',
-		'geoip-city-names.dat'
-	]
-},{
-	type: 'city',
-	url: 'http://geolite.maxmind.com/download/geoip/database/GeoLiteCityv6-beta/GeoLiteCityv6.csv.gz',
-	src: 'GeoLiteCityv6.csv',
-	dest: 'geoip-city6.dat'
-}];
+var databases = [
+	{
+		type: 'country',
+		url: 'https://geolite.maxmind.com/download/geoip/database/GeoIPCountryCSV.zip',
+		src: 'GeoIPCountryWhois.csv',
+		dest: 'geoip-country.dat'
+	},
+	{
+		type: 'country',
+		url: 'https://geolite.maxmind.com/download/geoip/database/GeoIPv6.csv.gz',
+		src: 'GeoIPv6.csv',
+		dest: 'geoip-country6.dat'
+	}
+];
 
 function mkdir(name) {
 	var dir = path.dirname(name);
@@ -56,7 +46,46 @@ function mkdir(name) {
 	}
 }
 
-function fetch(downloadUrl, cb) {
+// Ref: http://stackoverflow.com/questions/8493195/how-can-i-parse-a-csv-string-with-javascript
+// Return array of string values, or NULL if CSV string not well formed.
+function CSVtoArray(text) {
+    var re_valid = /^\s*(?:'[^'\\]*(?:\\[\S\s][^'\\]*)*'|"[^"\\]*(?:\\[\S\s][^"\\]*)*"|[^,'"\s\\]*(?:\s+[^,'"\s\\]+)*)\s*(?:,\s*(?:'[^'\\]*(?:\\[\S\s][^'\\]*)*'|"[^"\\]*(?:\\[\S\s][^"\\]*)*"|[^,'"\s\\]*(?:\s+[^,'"\s\\]+)*)\s*)*$/;
+    var re_value = /(?!\s*$)\s*(?:'([^'\\]*(?:\\[\S\s][^'\\]*)*)'|"([^"\\]*(?:\\[\S\s][^"\\]*)*)"|([^,'"\s\\]*(?:\s+[^,'"\s\\]+)*))\s*(?:,|$)/g;
+    // Return NULL if input string is not well formed CSV string.
+    if (!re_valid.test(text)) return null;
+    var a = [];                     // Initialize array to receive values.
+    text.replace(re_value, // "Walk" the string using replace with callback.
+        function(m0, m1, m2, m3) {
+            // Remove backslash from \' in single quoted values.
+            if      (m1 !== undefined) a.push(m1.replace(/\\'/g, "'"));
+            // Remove backslash from \" in double quoted values.
+            else if (m2 !== undefined) a.push(m2.replace(/\\"/g, '"'));
+            else if (m3 !== undefined) a.push(m3);
+            return ''; // Return empty string.
+        });
+    // Handle special case of empty last value.
+    if (/,\s*$/.test(text)) a.push('');
+    return a;
+}
+
+function fetch(database, cb) {
+
+	var downloadUrl = database.url;
+	var fileName = downloadUrl.split('/').pop();
+	var gzip = path.extname(fileName) === '.gz';
+
+	if (gzip) {
+		fileName = fileName.replace('.gz', '');
+	}
+
+	var tmpFile = path.join(tmpPath, fileName);
+
+	if (fs.existsSync(tmpFile)) {
+		return cb(null, tmpFile, fileName, database);
+	}
+
+	console.log('Fetching ', downloadUrl);
+
 	function getOptions() {
 		if (process.env.http_proxy) {
 			var options = url.parse(process.env.http_proxy);
@@ -68,7 +97,12 @@ function fetch(downloadUrl, cb) {
 
 			return options;
 		} else {
-			return url.parse(downloadUrl);
+			var options = url.parse(downloadUrl);
+			options.headers = {
+				'Host': url.parse(downloadUrl).host,
+				'User-Agent': user_agent
+			};
+			return options;
 		}
 	}
 
@@ -76,7 +110,7 @@ function fetch(downloadUrl, cb) {
 		var status = response.statusCode;
 
 		if (status !== 200) {
-			console.log('ERROR'.red + ': HTTP Request Failed [%d %s]', status, http.STATUS_CODES[status]);
+			console.log('ERROR'.red + ': HTTP Request Failed [%d %s]', status, https.STATUS_CODES[status]);
 			client.abort();
 			process.exit();
 		}
@@ -92,60 +126,49 @@ function fetch(downloadUrl, cb) {
 
 		tmpFilePipe.on('close', function() {
 			console.log(' DONE'.green);
-			cb(tmpFile, fileName);
+			cb(null, tmpFile, fileName, database);
 		});
 	}
 
-	var fileName = downloadUrl.split('/').pop();
-	var gzip = (fileName.indexOf('.gz') !== -1);
-
-	if (gzip) {
-		fileName = fileName.replace('.gz', '');
-	}
-
-	var tmpFile = path.join(tmpPath, fileName);
-
 	mkdir(tmpFile);
 
-	var client = http.get(getOptions(), onResponse);
+	var client = https.get(getOptions(), onResponse);
 
 	process.stdout.write('Retrieving ' + fileName + ' ...');
 }
 
-function extract(tmpFile, tmpFileName, cb) {
-	if (tmpFileName.indexOf('.zip') === -1) {
-		cb();
+function extract(tmpFile, tmpFileName, database, cb) {
+	if (path.extname(tmpFileName) !== '.zip') {
+		cb(null, database);
 	} else {
 		process.stdout.write('Extracting ' + tmpFileName + ' ...');
-
-		var unzipStream = unzip.Extract({
-			path: path.dirname(tmpFile)
-		});
-
-		var pipeSteam = fs.createReadStream(tmpFile).pipe(unzipStream);
-
-		pipeSteam.on('end', function() {
-			console.log(' DONE'.green);
-
-			if (tmpFileName.indexOf('GeoLiteCity') !== -1) {
-				var oldPath = path.join(tmpPath, path.basename(tmpFileName, '.zip'));
-				var newPath = path.join(tmpPath, 'GeoLiteCity');
-				fs.renameSync(oldPath, newPath);
-			}
-
-			cb();
-		});
+		fs.createReadStream(tmpFile)
+			.pipe(unzip.Parse())
+			.on('entry', function(entry) {
+				var fileName = path.basename(entry.path);
+				var type = entry.type; // 'Directory' or 'File'
+				if (type.toLowerCase() === 'file' && path.extname(fileName) === '.csv') {
+					entry.pipe(fs.createWriteStream(path.join(tmpPath, fileName)));
+				} else {
+					entry.autodrain();
+				}
+			})
+			.on('finish', function() {
+				cb(null, database);
+			});
 	}
 }
 
 function processCountryData(src, dest, cb) {
+	var lines=0;
 	function processLine(line) {
-		var fields = line.split(/, */);
+		var fields = CSVtoArray(line);
 
-		if (fields.length < 6) {
+		if (!fields || fields.length < 6) {
 			console.log("weird line: %s::", line);
 			return;
 		}
+		lines++;
 
 		var sip;
 		var eip;
@@ -184,6 +207,10 @@ function processCountryData(src, dest, cb) {
 		b.write(cc, bsz - 2);
 
 		fs.writeSync(datFile, b, 0, bsz, null);
+		if(Date.now() - tstart > 5000) {
+			tstart = Date.now();
+			process.stdout.write('\nStill working (' + lines + ') ...');
+		}
 	}
 
 	var dataFile = path.join(dataPath, dest);
@@ -193,26 +220,30 @@ function processCountryData(src, dest, cb) {
 	mkdir(dataFile);
 
 	process.stdout.write('Processing Data (may take a moment) ...');
+	var tstart = Date.now();
 	var datFile = fs.openSync(dataFile, "w");
-	var csvStream = new LineInputStream(fs.createReadStream(tmpDataFile), /[\r\n]+/);
 
-	csvStream.setEncoding('utf8');
-
-	csvStream.on('line', processLine);
-
-	csvStream.on('end', function() {
-		console.log(' DONE'.green);
-		cb();
-	});
+	lazy(fs.createReadStream(tmpDataFile))
+		.lines
+		.map(function(byteArray) {
+			return iconv.decode(byteArray, 'latin1');
+		})
+		.skip(1)
+		.map(processLine)
+		.on('pipe', function() {
+			console.log(' DONE'.green);
+			cb();
+		});
 }
 
 function processCityData(src, dest, cb) {
+	var lines = 0;
 	function processLine(line) {
 		if (line.match(/^Copyright/) || !line.match(/\d/)) {
 			return;
 		}
 
-		var fields = line.replace(/"/g, '').split(/, */);
+		var fields = CSVtoArray(line);
 		var sip;
 		var eip;
 		var locId;
@@ -220,6 +251,8 @@ function processCityData(src, dest, cb) {
 		var bsz;
 
 		var i;
+
+		lines++;
 
 		if (fields[0].match(/:/)) {
 			// IPv6
@@ -269,6 +302,10 @@ function processCityData(src, dest, cb) {
 		}
 
 		fs.writeSync(datFile, b, 0, b.length, null);
+		if(Date.now() - tstart > 5000) {
+			tstart = Date.now();
+			process.stdout.write('\nStill working (' + lines + ') ...');
+		}
 	}
 
 	var dataFile = path.join(dataPath, dest);
@@ -277,31 +314,46 @@ function processCityData(src, dest, cb) {
 	rimraf(dataFile);
 
 	process.stdout.write('Processing Data (may take a moment) ...');
+	var tstart = Date.now();
 	var datFile = fs.openSync(dataFile, "w");
 
-	var csvStream = new LineInputStream(fs.createReadStream(tmpDataFile), /[\r\n]+/);
-	csvStream.setEncoding('utf8');
-
-	csvStream.on('line', processLine);
-	csvStream.on('end', function() {
-		cb();
-	});
+	lazy(fs.createReadStream(tmpDataFile))
+		.lines
+		.map(function(byteArray) {
+			return iconv.decode(byteArray, 'latin1');
+		})
+		.skip(1)
+		.map(processLine)
+		.on('pipe', cb);
 }
 
 function processCityDataNames(src, dest, cb) {
+	var locId = null;
+
 	function processLine(line, i, a) {
 		if (line.match(/^Copyright/) || !line.match(/\d/)) {
 			return;
 		}
 
-		var fields = line.replace(/"/g, '').split(/, */);
+		var b;
+		var sz = 64;
+		var fields = CSVtoArray(line);
+		if (locId === null)
+			locId = parseInt(fields[0]);
+		else {
+			if (parseInt(fields[0]) - 1 > locId) {
+				b = new Buffer(sz);
+				b.fill(0);
+				fs.writeSync(datFile, b, 0, b.length, null);
+			}
+			locId = parseInt(fields[0]);
+		}
 		var cc = fields[1];
 		var rg = fields[2];
 		var city = fields[3];
 		var lat = Math.round(parseFloat(fields[5]) * 10000);
 		var lon = Math.round(parseFloat(fields[6]) * 10000);
-		var b;
-		var sz = 32;
+		var metro = parseInt(fields[7]);
 
 		b = new Buffer(sz);
 		b.fill(0);
@@ -309,7 +361,12 @@ function processCityDataNames(src, dest, cb) {
 		b.write(rg, 2);
 		b.writeInt32BE(lat, 4);
 		b.writeInt32BE(lon, 8);
-		b.write(city, 12);
+
+		if(metro){
+			b.writeInt32BE(metro, 12);
+		}
+
+		b.write(city, 16);
 
 		fs.writeSync(datFile, b, 0, b.length, null);
 	}
@@ -321,16 +378,21 @@ function processCityDataNames(src, dest, cb) {
 
 	var datFile = fs.openSync(dataFile, "w");
 
-	var csvStream = new LineInputStream(fs.createReadStream(tmpDataFile), /[\r\n]+/);
-	csvStream.setEncoding('utf8');
-
-	csvStream.on('line', processLine);
-	csvStream.on('end', function() {
-		cb();
-	});
+	lazy(fs.createReadStream(tmpDataFile))
+		.lines
+		.map(function(byteArray) {
+			return iconv.decode(byteArray, 'latin1');
+		})
+		.skip(1)
+		.map(processLine)
+		.on('pipe', cb);
 }
 
-function processData(type, src, dest, cb) {
+function processData(database, cb) {
+	var type = database.type;
+	var src = database.src;
+	var dest = database.dest;
+
 	if (type === 'country') {
 		processCountryData(src, dest, cb);
 	} else if (type === 'city-extended') {
@@ -351,22 +413,18 @@ function processData(type, src, dest, cb) {
 rimraf(tmpPath);
 mkdir(tmpPath);
 
-async.forEachSeries(databases, function(database, nextDatabase) {
-	fetch(database.url, function(tmpFile, tmpFileName) {
-		extract(tmpFile, tmpFileName, function() {
-			processData(database.type, database.src, database.dest, function() {
-				console.log();
-				nextDatabase();
-			});
-		});
-	});
-}, function(err) {
-	console.log();
+async.eachSeries(databases, function(database, nextDatabase) {
 
+	async.seq(fetch, extract, processData)(database, nextDatabase);
+
+}, function(err) {
 	if (err) {
 		console.log('Failed to Update Databases from MaxMind.'.red);
-		process.exit();
+		process.exit(1);
 	} else {
 		console.log('Successfully Updated Databases from MaxMind.'.green);
+		if (process.argv[2]=='debug') console.log('Notice: temporary files are not deleted for debug purposes.'.bold.yellow);
+		else rimraf(tmpPath);
+		process.exit(0);
 	}
 });

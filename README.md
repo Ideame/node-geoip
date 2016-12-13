@@ -64,6 +64,11 @@ Then download the city data files from https://github.com/bluesmoon/node-geoip/t
 You need to get `geoip-city.dat` and `geoip-city-names.dat` and put them into the `data/` directory
 of this package.
 
+You could also run `npm run-script updatedb` to do this automatically.
+
+**NOTE** that this requires a lot of RAM.  It is known to fail on on a Digital Ocean or AWS micro instance.
+There are no plans to change this.  `geoip-lite` stores all data in RAM in order to be fast.
+
 API
 ---
 
@@ -111,16 +116,36 @@ the `pretty` method can be used to turn it into a human readable string.
 This method returns a string if the input was in a format that `geoip-lite` can recognise, else it returns the
 input itself.
 
+### Start and stop watching for data updates ###
+
+If you have a server running `geoip-lite`, and you want to update its geo data without a restart, you can enable
+the data watcher to automatically refresh in-memory geo data when a file changes in the data directory.
+
+```javascript
+geoip.startWatchingDataUpdate();
+```
+
+This tool can be used with `npm run-script updatedb` to periodically update geo data on a running server.
+
+
 Built-in Updater
 ----------------
 
 This package contains an update script that can pull the files from MaxMind and handle the conversion from CSV.
 A npm script alias has been setup to make this process easy. Please keep in mind this requires internet and MaxMind
-rate limits that amount of downloads on thier servers.
+rate limits that amount of downloads on their servers.
 
 ```shell
 npm run-script updatedb
 ```
+
+You can also run it by doing:
+
+```bash
+node ./node_modules/geoip-lite/scripts/updatedb.js
+```
+
+Or, if you really want, run the update once by `require('geoip-lite/scripts/updatedb.js')`.
 
 Caveats
 -------

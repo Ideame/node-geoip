@@ -1,6 +1,6 @@
 {
 	"name": "geoip-lite-ideame",
-	"version": "1.0.11",
+	"version": "1.1.8-ideame",
 	"description": "A light weight native JavaScript implementation of GeoIP API from MaxMind",
 	"keywords": ["geo", "geoip", "ip", "ipv4", "ipv6", "geolookup", "maxmind", "geolite"],
 	"homepage": "https://github.com/bluesmoon/node-geoip",
@@ -12,21 +12,27 @@
 		"url": "git@github.com:Ideame/node-geoip.git"
 	},
 	"engines": {
-		"node": ">=0.6.3"
-	},
+        "node": ">=0.6.3"
+    },
 	"scripts": {
 		"test": "nodeunit --reporter=minimal test/tests.js",
-		"updatedb": "node scripts/updatedb.js"
+		"updatedb": "node scripts/updatedb.js",
+		"updatedb-debug": "node scripts/updatedb.js debug"
 	},
 	"dependencies": {
-		"async": "~0.1.22",
-		"colors": "0.6.0-1",
-		"rimraf": "~2.0.2",
-		"unzip": "~0.0.4",
-		"line-input-stream": "1.0.1"
+		"async": "^2.1.1",
+		"colors": "^1.1.2",
+		"glob": "^7.1.1",
+		"iconv-lite": "^0.4.13",
+		"lazy": "^1.0.11",
+		"rimraf": "^2.5.2",
+		"unzip": "^0.1.11"
+	},
+	"config": {
+		"update": true
 	},
 	"devDependencies": {
-		"nodeunit": "~0.7.4",
-		"line-input-stream": "~1.0.0"
-	}
+		"nodeunit": "^0.10.2"
+	},
+	"license": "Apache-2.0"
 }
